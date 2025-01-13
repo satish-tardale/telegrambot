@@ -14,6 +14,7 @@ const express = require('express');
 const app = express();
 const postRoutes = require('./routes/post');
 const validator = require('validator');
+const handleCallbackQuery = require('./handlers/movie-callback');
 
 // Usage
 
@@ -137,8 +138,9 @@ const getPostsByName = async (query) => {
 
 // Handle incoming messages
 
-let post;
-bot.on("message", async (msg) => {
+const fileCache = new Map();
+
+bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userQuery = msg.text;
 
@@ -148,66 +150,64 @@ bot.on("message", async (msg) => {
     if (posts && posts.length > 0) {
       const channelUsername = "coldycrackbackup";
 
-      const inlineKeyboard = posts.map(post => {
-        const postLink = `https://t.me/${channelUsername}/${post.message_id}`;
-        const fileId = post.file_ref || post.file_id;
-        if (!fileId) return []; // Skip invalid entries
+      // Build inline keyboard with valid posts
+      const inlineKeyboard = posts
+        .map((post, index) => {
+          const postLink = `https://t.me/${channelUsername}/${post.message_id}`;
+          const fileId = post.file_id || post.file_ref;
 
-        const callbackData = `download_${validator.escape(fileId).slice(0, 50)}`;
+          if (!fileId) return null; // Skip posts without valid fileId
 
-        return [
-          { text: "Download File", callback_data: callbackData },
-          { text: "View Post", url: postLink },
-        ];
-      }).filter(button => button.length > 0); // Remove empty entries
+          // Generate a unique ID for callback data
+          const uniqueId = `f${index}`;
+          fileCache.set(uniqueId, fileId); // Cache the fileId for retrieval in callback
 
+          return [
+            {
+              text: `Download File ${index + 1}`,
+              callback_data: uniqueId, // Assign unique callback data
+            },
+            {
+              text: "View Post",
+              url: postLink, // Add a direct link to the Telegram post
+            },
+          ];
+        })
+        .filter(Boolean); // Remove null entries
+
+      // Ensure at least one valid inline button exists
       if (inlineKeyboard.length > 0) {
-        bot.sendMessage(chatId, "Here are the results:", {
+        await bot.sendMessage(chatId, "Here are the matching files:", {
           reply_markup: {
             inline_keyboard: inlineKeyboard,
           },
         });
       } else {
-        bot.sendMessage(chatId, "No valid files found.");
+        // Inform user when no valid posts are found
+        await bot.sendMessage(chatId, "No valid files found for your query.");
       }
     } else {
-      bot.sendMessage(chatId, "Sorry, I couldn't find any files matching your query.");
+      // Handle no matching posts scenario
+      await bot.sendMessage(chatId, "No files found matching your query.");
     }
   } catch (error) {
-    console.error("Error handling message:", error);
-    bot.sendMessage(chatId, "An error occurred while processing your request.");
+    console.error("Error processing message:", error);
+
+    // Send an error response to the user
+    await bot.sendMessage(chatId, "Sorry, an error occurred while processing your request.");
   }
 });
 
 
 
-// Handle callback queries
-bot.on("callback_query", async (callbackQuery) => {
-  const chatId = callbackQuery.message.chat.id;
-  const data = callbackQuery.data;
-
-  if (data.startsWith("download_")) {
-    const fileId = Buffer.from(data.split("_")[1], "base64url").toString();
-
-    console.log('File ID:', fileId);
-
-    try {
-      // Validate and fetch the file using the `fileId` if needed
-
-      await bot.sendDocument(chatId, fileId, {
-        caption: "Here is your file.",
-      });
-
-      await bot.answerCallbackQuery(callbackQuery.id, { text: "File is being sent!" });
-    } catch (err) {
-      console.error("Error sending document:", err.message);
-      await bot.answerCallbackQuery(callbackQuery.id, {
-        text: "Failed to send the file. Please try again later.",
-        show_alert: true,
-      });
-    }
-  }
+// Use the separate callback query handler
+bot.on('callback_query', (callbackQuery) => {
+  handleCallbackQuery(bot, callbackQuery, fileCache);
 });
+
+
+
+
 
 
 
