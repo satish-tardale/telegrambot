@@ -1,0 +1,66 @@
+{
+	"name": "beetube-bot",
+	"version": "1.0.0",
+	"description": "A telegram 🤖 bot for music, movies, anime, torrent, EDM tracks, series downloads, files, and more.",
+	"keywords": [
+		"telegram",
+		"bot",
+		"download",
+		"free",
+		"movies",
+		"music",
+		"torrent",
+		"anime"
+	],
+	"main": "bot.js",
+	"scripts": {
+		"test": "jest",
+		"start": "node bot.js",
+		"dev": "nodemon --trace-warnings bot.js"
+	},
+	"author": "Lawrence Onah <paplow01@gmail.com>",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/kodjunkie/beetube-bot/issues"
+	},
+	"homepage": "https://github.com/kodjunkie/beetube-bot#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/kodjunkie/beetube-bot.git"
+	},
+	"engines": {
+		"node": ">=16.x"
+	},
+	"jest": {
+		"testEnvironment": "node",
+		"setupFilesAfterEnv": [
+			"./setup-tests.js"
+		]
+	},
+	"dependencies": {
+		"axios": "^1.7.9",
+		"base64url": "^3.0.1",
+		"bluebird": "^3.7.2",
+		"bson": "^4.7.2",
+		"dotenv": "^16.4.7",
+		"express": "^4.21.2",
+		"input": "^1.0.1",
+		"lodash": "^4.17.21",
+		"mongodb": "^4.17.2",
+		"mongoose": "^7.0.3",
+		"node-telegram-bot-api": "^0.61.0",
+		"telegraf": "^4.16.3",
+		"telegram": "^2.26.16",
+		"telegram-bot-api": "^2.0.1",
+		"validator": "^13.12.0"
+	},
+	"devDependencies": {
+		"eslint": "^8.36.0",
+		"eslint-config-prettier": "^8.8.0",
+		"eslint-plugin-node": "^11.1.0",
+		"eslint-plugin-prettier": "^4.2.1",
+		"jest": "^29.5.0",
+		"nodemon": "^2.0.22",
+		"prettier": "^2.8.7"
+	}
+}
