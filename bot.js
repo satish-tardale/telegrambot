@@ -29,7 +29,14 @@ const handler = require("./handlers");
 const Post = require('./models/post');
 
 const TOKEN = env.BOT_TOKEN;
-const bot = new TelegramBot(TOKEN, { polling: true }); // Declare the bot once here
+const bot = new TelegramBot(TOKEN, {
+  polling: {
+    autoStart: true,
+    params: {
+      timeout: 60
+    }
+  }
+});// Declare the bot once here
 
 const apiId = Number(process.env.API_ID || '21559494'); // Ensure it's a number
 const apiHash = process.env.API_HASH; // Replace with your API Hash
@@ -136,10 +143,6 @@ const getPostsByName = async (query) => {
   return await collection.find({ file_name: { $regex: query, $options: "i" } }).toArray();
 };
 
-// Handle incoming messages
-
-const fileCache = new Map();
-
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userQuery = msg.text;
@@ -148,63 +151,74 @@ bot.on('message', async (msg) => {
     const posts = await getPostsByName(userQuery);
 
     if (posts && posts.length > 0) {
-      const channelUsername = "coldycrackbackup";
+      // Send each file as a separate message with a single button
+      for (const post of posts) {
+        const fileId = post.file_id || post.file_ref;
+        const fileName = post.file_name;
 
-      // Build inline keyboard with valid posts
-      const inlineKeyboard = posts
-        .map((post, index) => {
-          const postLink = `https://t.me/${channelUsername}/${post.message_id}`;
-          const fileId = post.file_id || post.file_ref;
+        if (!fileId || !fileName) continue;
 
-          if (!fileId) return null; // Skip posts without valid fileId
-
-          // Generate a unique ID for callback data
-          const uniqueId = `f${index}`;
-          fileCache.set(uniqueId, fileId); // Cache the fileId for retrieval in callback
-
-          return [
-            {
-              text: `Download File ${index + 1}`,
-              callback_data: uniqueId, // Assign unique callback data
-            },
-            {
-              text: "View Post",
-              url: postLink, // Add a direct link to the Telegram post
-            },
-          ];
-        })
-        .filter(Boolean); // Remove null entries
-
-      // Ensure at least one valid inline button exists
-      if (inlineKeyboard.length > 0) {
-        await bot.sendMessage(chatId, "Here are the matching files:", {
+        // Create a simple message with file name and a download button
+        await bot.sendMessage(chatId, `📁 ${fileName}`, {
           reply_markup: {
-            inline_keyboard: inlineKeyboard,
-          },
+            inline_keyboard: [[
+              { text: '📥 Download', callback_data: `d:${fileId.slice(-20)}` } // Added colon to match the check
+            ]]
+          }
         });
-      } else {
-        // Inform user when no valid posts are found
-        await bot.sendMessage(chatId, "No valid files found for your query.");
       }
     } else {
-      // Handle no matching posts scenario
       await bot.sendMessage(chatId, "No files found matching your query.");
     }
   } catch (error) {
     console.error("Error processing message:", error);
-
-    // Send an error response to the user
     await bot.sendMessage(chatId, "Sorry, an error occurred while processing your request.");
   }
 });
 
-
-
-// Use the separate callback query handler
-bot.on('callback_query', (callbackQuery) => {
-  handleCallbackQuery(bot, callbackQuery, fileCache);
+bot.on('callback_query', async (callbackQuery) => {
+  try {
+    const chatId = callbackQuery.message.chat.id;
+    const data = callbackQuery.data;
+    
+    // Check if it's a download request
+    if (data.startsWith('d:')) {
+      const shortFileId = data.slice(2); // Remove 'd:' prefix
+      const fullFileId = await getFullFileIdFromDatabase(shortFileId);
+      
+      if (fullFileId) {
+        await bot.sendDocument(chatId, fullFileId);
+        await bot.answerCallbackQuery(callbackQuery.id, { text: "Downloading..." });
+      } else {
+        await bot.answerCallbackQuery(callbackQuery.id, { text: "File not found" });
+      }
+    } else {
+      await bot.answerCallbackQuery(callbackQuery.id, { text: "Invalid request" });
+    }
+  } catch (error) {
+    console.error("Error in callback query:", error);
+    await bot.answerCallbackQuery(callbackQuery.id, { text: "Download failed" });
+  }
 });
 
+const getFullFileIdFromDatabase = async (shortId) => {
+  try {
+    const db = client.db(dbName);
+    const collection = db.collection('posts');
+    
+    const post = await collection.findOne({
+      $or: [
+        { file_id: { $regex: shortId + '$' } }, // Match the end of file_id
+        { file_ref: { $regex: shortId + '$' } } // Match the end of file_ref
+      ]
+    });
+
+    return post ? post.file_id || post.file_ref : null;
+  } catch (error) {
+    console.error("Error retrieving file ID:", error);
+    return null;
+  }
+};
 
 
 
@@ -216,7 +230,7 @@ bot.on('callback_query', (callbackQuery) => {
     
 
     
-    bot.on("callback_query", handler.callbackQuery(bot));
+    
     bot.on("polling_error", handler.botError);
     bot.on("error", handler.botError);
 
