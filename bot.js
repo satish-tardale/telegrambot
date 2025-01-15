@@ -33,7 +33,7 @@ const bot = new TelegramBot(TOKEN, {
   polling: {
     autoStart: true,
     params: {
-      timeout: 60
+      timeout: 120
     }
   }
 });// Declare the bot once here
@@ -135,7 +135,6 @@ mongoose.connect(env.MONGODB_URI, config.mongodb)
     });
 
 
-
 //user provide link
 const getPostsByName = async (query) => {
   const db = client.db(dbName);
@@ -146,6 +145,15 @@ const getPostsByName = async (query) => {
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const userQuery = msg.text;
+
+    console.log("====================>",userQuery);
+
+  //   if (msg && typeof msg.text === 'string' && 
+  //     ignoredCommands.map(c => c.toLowerCase()).includes(msg.text.toLowerCase())) {
+  //   console.log(`Ignored command: ${msg.text}`);
+  //   return;
+  // }
+    
 
   try {
     const posts = await getPostsByName(userQuery);
@@ -168,7 +176,7 @@ bot.on('message', async (msg) => {
         });
       }
     } else {
-      await bot.sendMessage(chatId, "No files found matching your query.");
+      await bot.sendMessage(chatId, "Please  Search movie on google and  then Search on bot.check spelling");
     }
   } catch (error) {
     console.error("Error processing message:", error);
