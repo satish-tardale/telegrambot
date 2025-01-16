@@ -135,99 +135,236 @@ mongoose.connect(env.MONGODB_URI, config.mongodb)
     });
 
 
-//user provide link
-const getPostsByName = async (query) => {
-  const db = client.db(dbName);
-  const collection = db.collection('posts');
-  return await collection.find({ file_name: { $regex: query, $options: "i" } }).toArray();
-};
 
+
+
+// Initialize the search cache at the top level
+const searchCache = new Map();
+
+
+// Function to get posts by name with improved error handling
+async function getPostsByName(query) {
+  try {
+    const db = client.db(dbName);
+    const collection = db.collection('posts');
+    
+    const posts = await collection.find({
+      file_name: { $regex: query, $options: 'i' }
+    }).toArray();
+
+    // Add query to each post for pagination reference
+    return posts.map(post => ({ ...post, query }));
+  } catch (error) {
+    console.error('Error fetching posts:', error);
+    return [];
+  }
+}
+
+// Enhanced keyboard generation with better pagination
+function generateKeyboard(items, currentPage, pageSize, query) {
+  const totalItems = items.length;
+  const totalPages = Math.ceil(totalItems / pageSize);
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = Math.min(startIndex + pageSize, totalItems);
+  const pageItems = items.slice(startIndex, endIndex);
+
+  // Generate file buttons
+  const keyboard = pageItems.map((item, index) => {
+    const displayName = item.file_name.length > 35 
+      ? item.file_name.substring(0, 32) + '...'
+      : item.file_name;
+    
+    return [{
+      text: `📥 ${index + 1}. ${displayName}`,
+      callback_data: `d:${(item.file_id || item.file_ref).slice(-20)}`
+    }];
+  });
+
+  // Add pagination controls
+  const paginationRow = [];
+  
+  // First page button
+  if (currentPage > 1) {
+    paginationRow.push({
+      text: '⏮ First',
+      callback_data: `page:1:${query}`
+    });
+  }
+
+  // Previous page button
+  if (currentPage > 1) {
+    paginationRow.push({
+      text: '◀️ Prev',
+      callback_data: `page:${currentPage - 1}:${query}`
+    });
+  }
+
+  // Page indicator
+  paginationRow.push({
+    text: `📄 ${currentPage}/${totalPages}`,
+    callback_data: 'noop'
+  });
+
+  // Next page button
+  if (currentPage < totalPages) {
+    paginationRow.push({
+      text: 'Next ▶️',
+      callback_data: `page:${currentPage + 1}:${query}`
+    });
+  }
+
+  // Last page button
+  if (currentPage < totalPages) {
+    paginationRow.push({
+      text: 'Last ⏭',
+      callback_data: `page:${totalPages}:${query}`
+    });
+  }
+
+  if (paginationRow.length > 0) {
+    keyboard.push(paginationRow);
+  }
+
+  // Add results counter and close button
+  keyboard.push([{
+    text: `📊 ${totalItems} results found`,
+    callback_data: 'noop'
+  }]);
+
+  return keyboard;
+}
+
+
+// Message handler
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const userQuery = msg.text;
+  const userQuery = msg.text?.trim();
 
-    console.log("====================>",userQuery);
-
-  //   if (msg && typeof msg.text === 'string' && 
-  //     ignoredCommands.map(c => c.toLowerCase()).includes(msg.text.toLowerCase())) {
-  //   console.log(`Ignored command: ${msg.text}`);
-  //   return;
-  // }
-    
+  if (!userQuery || userQuery.startsWith('/')) {
+    if (userQuery === '/start') {
+      await bot.sendMessage(
+        chatId,
+        '👋 Welcome! Send me a search query to find files.'
+      );
+    }
+    return;
+  }
 
   try {
+    await bot.sendMessage(chatId, '🔍 Searching...');
     const posts = await getPostsByName(userQuery);
 
-    if (posts && posts.length > 0) {
-      // Send each file as a separate message with a single button
-      for (const post of posts) {
-        const fileId = post.file_id || post.file_ref;
-        const fileName = post.file_name;
+    if (posts.length > 0) {
+      searchCache.set(chatId, userQuery); // Fixed: using searchCache instead of userSearchCache
+      const keyboard = generateKeyboard(posts, 1, 10, userQuery);
+      
+      await bot.sendMessage(
+        chatId,
+        `🎯 Found ${posts.length} results for "${userQuery}":`,
+        {
+          reply_markup: { inline_keyboard: keyboard },
+          parse_mode: 'HTML'
+        }
+      );
+    } else {
+      await bot.sendMessage(
+        chatId,
+        '❌ No results found. Please try a different search term.'
+      );
+    }
+  } catch (error) {
+    console.error('Search error:', error);
+    await bot.sendMessage(
+      chatId,
+      '⚠️ An error occurred while searching. Please try again later.'
+    );
+  }
+});
 
-        if (!fileId || !fileName) continue;
+// Callback query handler
+bot.on('callback_query', async (callbackQuery) => {
+  const chatId = callbackQuery.message.chat.id;
+  const messageId = callbackQuery.message.message_id;
+  const data = callbackQuery.data;
 
-        // Create a simple message with file name and a download button
-        await bot.sendMessage(chatId, `📁 ${fileName}`, {
-          reply_markup: {
-            inline_keyboard: [[
-              { text: '📥 Download', callback_data: `d:${fileId.slice(-20)}` } // Added colon to match the check
-            ]]
+  try {
+    if (data === 'noop') {
+      await bot.answerCallbackQuery(callbackQuery.id);
+      return;
+    }
+
+    if (data.startsWith('page:')) {
+      const [_, page, query] = data.split(':');
+      const currentPage = parseInt(page, 10);
+      const posts = await getPostsByName(query);
+
+      if (posts.length > 0) {
+        const keyboard = generateKeyboard(posts, currentPage, 10, query);
+        
+        await bot.editMessageText(
+          `🎯 Found ${posts.length} results for "${query}":`,
+          {
+            chat_id: chatId,
+            message_id: messageId,
+            reply_markup: { inline_keyboard: keyboard },
+            parse_mode: 'HTML'
           }
+        );
+      }
+      
+      await bot.answerCallbackQuery(callbackQuery.id);
+    } else if (data.startsWith('d:')) {
+      const fileId = data.slice(2);
+      const fileDetails = await getFileDetailsFromDatabase(fileId);
+
+      if (fileDetails?.file_id) {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+          text: '📤 Sending file...'
+        });
+        
+        await bot.sendDocument(chatId, fileDetails.file_id, {
+          caption: `📁 ${fileDetails.file_name}`
+        });
+      } else {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+          text: '❌ File not found',
+          show_alert: true
         });
       }
-    } else {
-      await bot.sendMessage(chatId, "Please  Search movie on google and  then Search on bot.check spelling");
     }
   } catch (error) {
-    console.error("Error processing message:", error);
-    await bot.sendMessage(chatId, "Sorry, an error occurred while processing your request.");
+    console.error('Callback query error:', error);
+    await bot.answerCallbackQuery(callbackQuery.id, {
+      text: '⚠️ An error occurred',
+      show_alert: true
+    });
   }
 });
 
-bot.on('callback_query', async (callbackQuery) => {
-  try {
-    const chatId = callbackQuery.message.chat.id;
-    const data = callbackQuery.data;
-    
-    // Check if it's a download request
-    if (data.startsWith('d:')) {
-      const shortFileId = data.slice(2); // Remove 'd:' prefix
-      const fullFileId = await getFullFileIdFromDatabase(shortFileId);
-      
-      if (fullFileId) {
-        await bot.sendDocument(chatId, fullFileId);
-        await bot.answerCallbackQuery(callbackQuery.id, { text: "Downloading..." });
-      } else {
-        await bot.answerCallbackQuery(callbackQuery.id, { text: "File not found" });
-      }
-    } else {
-      await bot.answerCallbackQuery(callbackQuery.id, { text: "Invalid request" });
-    }
-  } catch (error) {
-    console.error("Error in callback query:", error);
-    await bot.answerCallbackQuery(callbackQuery.id, { text: "Download failed" });
-  }
-});
-
-const getFullFileIdFromDatabase = async (shortId) => {
+// Enhanced file details retrieval
+async function getFileDetailsFromDatabase(shortId) {
   try {
     const db = client.db(dbName);
     const collection = db.collection('posts');
     
     const post = await collection.findOne({
       $or: [
-        { file_id: { $regex: shortId + '$' } }, // Match the end of file_id
-        { file_ref: { $regex: shortId + '$' } } // Match the end of file_ref
+        { file_id: { $regex: shortId + '$' } },
+        { file_ref: { $regex: shortId + '$' } }
       ]
     });
 
-    return post ? post.file_id || post.file_ref : null;
+    if (!post) return null;
+
+    return {
+      file_id: post.file_id || post.file_ref,
+      file_name: post.file_name || 'Unknown File'
+    };
   } catch (error) {
-    console.error("Error retrieving file ID:", error);
+    console.error('Database query error:', error);
     return null;
   }
-};
-
+}
 
 
 
