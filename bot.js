@@ -139,10 +139,8 @@ mongoose.connect(env.MONGODB_URI, config.mongodb)
 
 
 // Initialize the search cache at the top level
-const searchCache = new Map();
+const userResults = new Map(); // Store user-specific results
 
-
-// Function to get posts by name with improved error handling
 async function getPostsByName(query) {
   try {
     const db = client.db(dbName);
@@ -152,7 +150,6 @@ async function getPostsByName(query) {
       file_name: { $regex: query, $options: 'i' }
     }).toArray();
 
-    // Add query to each post for pagination reference
     return posts.map(post => ({ ...post, query }));
   } catch (error) {
     console.error('Error fetching posts:', error);
@@ -160,15 +157,15 @@ async function getPostsByName(query) {
   }
 }
 
-// Enhanced keyboard generation with better pagination
-function generateKeyboard(items, currentPage, pageSize, query) {
+// Enhanced keyboard generation with user verification
+function generateKeyboard(items, currentPage, pageSize, query, userId) {
   const totalItems = items.length;
   const totalPages = Math.ceil(totalItems / pageSize);
   const startIndex = (currentPage - 1) * pageSize;
   const endIndex = Math.min(startIndex + pageSize, totalItems);
   const pageItems = items.slice(startIndex, endIndex);
 
-  // Generate file buttons
+  // Generate file buttons with user ID in callback data
   const keyboard = pageItems.map((item, index) => {
     const displayName = item.file_name.length > 35 
       ? item.file_name.substring(0, 32) + '...'
@@ -176,48 +173,43 @@ function generateKeyboard(items, currentPage, pageSize, query) {
     
     return [{
       text: `📥 ${index + 1}. ${displayName}`,
-      callback_data: `d:${(item.file_id || item.file_ref).slice(-20)}`
+      callback_data: `d:${(item.file_id || item.file_ref).slice(-20)}:${userId}`
     }];
   });
 
-  // Add pagination controls
+  // Add pagination controls with user ID
   const paginationRow = [];
   
-  // First page button
   if (currentPage > 1) {
     paginationRow.push({
       text: '⏮ First',
-      callback_data: `page:1:${query}`
+      callback_data: `page:1:${query}:${userId}`
     });
   }
 
-  // Previous page button
   if (currentPage > 1) {
     paginationRow.push({
       text: '◀️ Prev',
-      callback_data: `page:${currentPage - 1}:${query}`
+      callback_data: `page:${currentPage - 1}:${query}:${userId}`
     });
   }
 
-  // Page indicator
   paginationRow.push({
     text: `📄 ${currentPage}/${totalPages}`,
     callback_data: 'noop'
   });
 
-  // Next page button
   if (currentPage < totalPages) {
     paginationRow.push({
       text: 'Next ▶️',
-      callback_data: `page:${currentPage + 1}:${query}`
+      callback_data: `page:${currentPage + 1}:${query}:${userId}`
     });
   }
 
-  // Last page button
   if (currentPage < totalPages) {
     paginationRow.push({
       text: 'Last ⏭',
-      callback_data: `page:${totalPages}:${query}`
+      callback_data: `page:${totalPages}:${query}:${userId}`
     });
   }
 
@@ -225,7 +217,6 @@ function generateKeyboard(items, currentPage, pageSize, query) {
     keyboard.push(paginationRow);
   }
 
-  // Add results counter and close button
   keyboard.push([{
     text: `📊 ${totalItems} results found`,
     callback_data: 'noop'
@@ -234,10 +225,10 @@ function generateKeyboard(items, currentPage, pageSize, query) {
   return keyboard;
 }
 
-
-// Message handler
+// Message handler with group chat support
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
   const userQuery = msg.text?.trim();
 
   if (!userQuery || userQuery.startsWith('/')) {
@@ -251,25 +242,31 @@ bot.on('message', async (msg) => {
   }
 
   try {
-    await bot.sendMessage(chatId, '🔍 Searching...');
+    const statusMessage = await bot.sendMessage(chatId, '🔍 Searching...');
     const posts = await getPostsByName(userQuery);
 
     if (posts.length > 0) {
-      searchCache.set(chatId, userQuery); // Fixed: using searchCache instead of userSearchCache
-      const keyboard = generateKeyboard(posts, 1, 10, userQuery);
+      // Store results for this specific user
+      userResults.set(`${userId}_${userQuery}`, posts);
       
-      await bot.sendMessage(
-        chatId,
-        `🎯 Found ${posts.length} results for "${userQuery}":`,
+      const keyboard = generateKeyboard(posts, 1, 10, userQuery, userId);
+      
+      await bot.editMessageText(
+        `🎯 <a href="tg://user?id=${userId}">${msg.from.first_name}</a>'s results for "${userQuery}":`,
         {
+          chat_id: chatId,
+          message_id: statusMessage.message_id,
           reply_markup: { inline_keyboard: keyboard },
           parse_mode: 'HTML'
         }
       );
     } else {
-      await bot.sendMessage(
-        chatId,
-        '❌ No results found. Please try a different search term.'
+      await bot.editMessageText(
+        '❌ No results found. Please try a different search term.',
+        {
+          chat_id: chatId,
+          message_id: statusMessage.message_id
+        }
       );
     }
   } catch (error) {
@@ -281,11 +278,14 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Callback query handler
+// Callback query handler with private message download
 bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const messageId = callbackQuery.message.message_id;
   const data = callbackQuery.data;
+  const userId = callbackQuery.from.id;
+  const isGroup = callbackQuery.message.chat.type === 'group' || 
+                 callbackQuery.message.chat.type === 'supergroup';
 
   try {
     if (data === 'noop') {
@@ -294,15 +294,26 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 
     if (data.startsWith('page:')) {
-      const [_, page, query] = data.split(':');
+      const [_, page, query, requestUserId] = data.split(':');
+      
+      // Verify user permission
+      if (userId.toString() !== requestUserId) {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+          text: '⚠️ These are not your search results',
+          show_alert: true
+        });
+        return;
+      }
+
       const currentPage = parseInt(page, 10);
-      const posts = await getPostsByName(query);
+      const userKey = `${userId}_${query}`;
+      const posts = userResults.get(userKey) || await getPostsByName(query);
 
       if (posts.length > 0) {
-        const keyboard = generateKeyboard(posts, currentPage, 10, query);
+        const keyboard = generateKeyboard(posts, currentPage, 10, query, userId);
         
         await bot.editMessageText(
-          `🎯 Found ${posts.length} results for "${query}":`,
+          `🎯 <a href="tg://user?id=${userId}">${callbackQuery.from.first_name}</a>'s results for "${query}":`,
           {
             chat_id: chatId,
             message_id: messageId,
@@ -314,17 +325,59 @@ bot.on('callback_query', async (callbackQuery) => {
       
       await bot.answerCallbackQuery(callbackQuery.id);
     } else if (data.startsWith('d:')) {
-      const fileId = data.slice(2);
+      const [_, fileId, requestUserId] = data.split(':');
+      
+      // Verify user permission
+      if (userId.toString() !== requestUserId) {
+        await bot.answerCallbackQuery(callbackQuery.id, {
+          text: '⚠️ You cannot access this file as it was requested by another user',
+          show_alert: true
+        });
+        return;
+      }
+
       const fileDetails = await getFileDetailsFromDatabase(fileId);
 
       if (fileDetails?.file_id) {
-        await bot.answerCallbackQuery(callbackQuery.id, {
-          text: '📤 Sending file...'
-        });
-        
-        await bot.sendDocument(chatId, fileDetails.file_id, {
-          caption: `📁 ${fileDetails.file_name}`
-        });
+        if (isGroup) {
+          // For group chats, send a private message with the file
+          try {
+            await bot.sendMessage(
+              userId,
+              '📤 Sending your requested file...'
+            );
+            
+            await bot.sendDocument(userId, fileDetails.file_id, {
+              caption: `📁 ${fileDetails.file_name}`
+            });
+
+            await bot.answerCallbackQuery(callbackQuery.id, {
+              text: '✅ File sent in private message!',
+              show_alert: true
+            });
+
+            // Send instructions if the user hasn't started the bot
+          } catch (error) {
+            if (error.response && error.response.error_code === 403) {
+              const botUsername = (await bot.getMe()).username;
+              await bot.answerCallbackQuery(callbackQuery.id, {
+                text: `🔐 Please start a private chat with me first!\n\n1. Click: @${botUsername}\n2. Press START\n3. Return here and try again`,
+                show_alert: true
+              });
+            } else {
+              throw error;
+            }
+          }
+        } else {
+          // For private chats, send directly
+          await bot.answerCallbackQuery(callbackQuery.id, {
+            text: '📤 Sending file...'
+          });
+          
+          await bot.sendDocument(chatId, fileDetails.file_id, {
+            caption: `📁 ${fileDetails.file_name}`
+          });
+        }
       } else {
         await bot.answerCallbackQuery(callbackQuery.id, {
           text: '❌ File not found',
@@ -341,7 +394,6 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-// Enhanced file details retrieval
 async function getFileDetailsFromDatabase(shortId) {
   try {
     const db = client.db(dbName);
@@ -365,7 +417,6 @@ async function getFileDetailsFromDatabase(shortId) {
     return null;
   }
 }
-
 
 
 
