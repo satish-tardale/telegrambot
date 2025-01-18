@@ -140,25 +140,49 @@ mongoose.connect(env.MONGODB_URI, config.mongodb)
 
 // Initialize the search cache at the top level
 const userResults = new Map(); // Store user-specific results
+const userSearchStates = new Map(); // Store search states for deep linking
+let botUsername = ''; // Store bot username
+
+// Initialize bot username when the bot starts
+bot.getMe().then(botInfo => {
+  botUsername = botInfo.username;
+  console.log(`🤖 Bot initialized as @${botUsername}`);
+}).catch(error => {
+  console.error('Error getting bot info:', error);
+});
 
 async function getPostsByName(query) {
   try {
+    // Ensure query is a string and handle null/undefined cases
+    const searchQuery = String(query || '').trim();
+    
+    if (!searchQuery) {
+      return [];
+    }
+
     const db = client.db(dbName);
     const collection = db.collection('posts');
     
     const posts = await collection.find({
-      file_name: { $regex: query, $options: 'i' }
+      file_name: { $regex: searchQuery, $options: 'i' }
     }).toArray();
 
-    return posts.map(post => ({ ...post, query }));
+    return posts.map(post => ({ ...post, query: searchQuery }));
   } catch (error) {
     console.error('Error fetching posts:', error);
     return [];
   }
 }
 
-// Enhanced keyboard generation with user verification
-function generateKeyboard(items, currentPage, pageSize, query, userId) {
+// Enhanced keyboard generation with deep linking support
+function formatFileSize(bytes) {
+  if (!bytes || isNaN(bytes)) return '0 B';
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+}
+
+function generateKeyboard(items, currentPage, pageSize, query, userId, isGroup = false) {
   const totalItems = items.length;
   const totalPages = Math.ceil(totalItems / pageSize);
   const startIndex = (currentPage - 1) * pageSize;
@@ -171,9 +195,12 @@ function generateKeyboard(items, currentPage, pageSize, query, userId) {
       ? item.file_name.substring(0, 32) + '...'
       : item.file_name;
     
+    const fileSize = formatFileSize(item.file_size);
+    const callbackData = `d:${(item.file_id || item.file_ref).slice(-20)}:${userId}`;
+    
     return [{
-      text: `📥 ${index + 1}. ${displayName}`,
-      callback_data: `d:${(item.file_id || item.file_ref).slice(-20)}:${userId}`
+      text: `📥 ${index + 1}. ${displayName}\n💾 ${fileSize}`,
+      callback_data: callbackData
     }];
   });
 
@@ -217,6 +244,21 @@ function generateKeyboard(items, currentPage, pageSize, query, userId) {
     keyboard.push(paginationRow);
   }
 
+  // Add view in private chat button for group chats
+  if (isGroup && botUsername) {
+    const searchStateId = Buffer.from(`${userId}-${query}-${currentPage}`).toString('base64');
+    userSearchStates.set(searchStateId, {
+      query,
+      currentPage,
+      userId
+    });
+    
+    keyboard.push([{
+      text: '🔐 View results in private chat',
+      url: `https://t.me/${botUsername}?start=search_${searchStateId}`
+    }]);
+  }
+
   keyboard.push([{
     text: `📊 ${totalItems} results found`,
     callback_data: 'noop'
@@ -231,49 +273,105 @@ bot.on('message', async (msg) => {
   const userId = msg.from.id;
   const userQuery = msg.text?.trim();
 
-  if (!userQuery || userQuery.startsWith('/')) {
-    if (userQuery === '/start') {
+  if (!userQuery || !userQuery.startsWith('/')) {
+    try {
+      const statusMessage = await bot.sendMessage(chatId, '🔍 Searching...');
+      const posts = await getPostsByName(userQuery);
+
+      if (posts.length > 0) {
+        // Store results for this specific user
+        userResults.set(`${userId}_${userQuery}`, posts);
+        
+        const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+        const keyboard = generateKeyboard(posts, 1, 10, userQuery, userId, isGroup);
+        
+        await bot.editMessageText(
+          `🎯 <a href="tg://user?id=${userId}">${msg.from.first_name}</a>'s results for "${userQuery}":`,
+          {
+            chat_id: chatId,
+            message_id: statusMessage.message_id,
+            reply_markup: { inline_keyboard: keyboard },
+            parse_mode: 'HTML'
+          }
+        );
+      } else {
+        await bot.editMessageText(
+          '❌ No results found. Please try a different search term.',
+          {
+            chat_id: chatId,
+            message_id: statusMessage.message_id
+          }
+        );
+      }
+    } catch (error) {
+      console.error('Search error:', error);
       await bot.sendMessage(
         chatId,
-        '👋 Welcome! Send me a search query to find files.'
+        '⚠️ An error occurred while searching. Please try again later.'
       );
     }
     return;
   }
 
-  try {
-    const statusMessage = await bot.sendMessage(chatId, '🔍 Searching...');
-    const posts = await getPostsByName(userQuery);
-
-    if (posts.length > 0) {
-      // Store results for this specific user
-      userResults.set(`${userId}_${userQuery}`, posts);
+  // Handle /start command with deep linking
+  if (userQuery.startsWith('/start')) {
+    const args = userQuery.split(' ');
+    if (args.length > 1 && args[1].startsWith('search_')) {
+      const searchStateId = args[1].replace('search_', '');
+      const searchState = userSearchStates.get(searchStateId);
       
-      const keyboard = generateKeyboard(posts, 1, 10, userQuery, userId);
-      
-      await bot.editMessageText(
-        `🎯 <a href="tg://user?id=${userId}">${msg.from.first_name}</a>'s results for "${userQuery}":`,
-        {
-          chat_id: chatId,
-          message_id: statusMessage.message_id,
-          reply_markup: { inline_keyboard: keyboard },
-          parse_mode: 'HTML'
+      if (searchState) {
+        if (searchState.userId === userId) {
+          if (searchState.type === 'download' && searchState.fileId) {
+            // Handle direct file download
+            const fileDetails = await getFileDetailsFromDatabase(searchState.fileId);
+            if (fileDetails?.file_id) {
+              await bot.sendMessage(chatId, '📤 Sending your requested file...');
+              await bot.sendDocument(chatId, fileDetails.file_id, {
+                caption: `📁 ${fileDetails.file_name}`
+              });
+              userSearchStates.delete(searchStateId); // Clean up the state
+              return;
+            }
+          } else {
+            // Handle search results display
+            const posts = userResults.get(`${userId}_${searchState.query}`) || 
+                         await getPostsByName(searchState.query);
+            
+            if (posts.length > 0) {
+              const keyboard = generateKeyboard(
+                posts, 
+                searchState.currentPage || 1, 
+                10, 
+                searchState.query, 
+                userId,
+                false // Not a group chat
+              );
+              
+              await bot.sendMessage(
+                chatId,
+                `🎯 Your search results for "${searchState.query}":`,
+                {
+                  reply_markup: { inline_keyboard: keyboard },
+                  parse_mode: 'HTML'
+                }
+              );
+              return;
+            }
+          }
+        } else {
+          await bot.sendMessage(
+            chatId,
+            '⚠️ These search results were requested by another user.'
+          );
+          return;
         }
-      );
-    } else {
-      await bot.editMessageText(
-        '❌ No results found. Please try a different search term.',
-        {
-          chat_id: chatId,
-          message_id: statusMessage.message_id
-        }
-      );
+      }
     }
-  } catch (error) {
-    console.error('Search error:', error);
+    
     await bot.sendMessage(
       chatId,
-      '⚠️ An error occurred while searching. Please try again later.'
+      '👋 Welcome! Send me a search query to find files.'
     );
   }
 });
@@ -310,7 +408,7 @@ bot.on('callback_query', async (callbackQuery) => {
       const posts = userResults.get(userKey) || await getPostsByName(query);
 
       if (posts.length > 0) {
-        const keyboard = generateKeyboard(posts, currentPage, 10, query, userId);
+        const keyboard = generateKeyboard(posts, currentPage, 10, query, userId, isGroup);
         
         await bot.editMessageText(
           `🎯 <a href="tg://user?id=${userId}">${callbackQuery.from.first_name}</a>'s results for "${query}":`,
@@ -339,35 +437,31 @@ bot.on('callback_query', async (callbackQuery) => {
       const fileDetails = await getFileDetailsFromDatabase(fileId);
 
       if (fileDetails?.file_id) {
-        if (isGroup) {
-          // For group chats, send a private message with the file
-          try {
-            await bot.sendMessage(
-              userId,
-              '📤 Sending your requested file...'
-            );
-            
-            await bot.sendDocument(userId, fileDetails.file_id, {
-              caption: `📁 ${fileDetails.file_name}`
-            });
+        if (isGroup && botUsername) {
+          const searchStateId = Buffer.from(`${userId}-download-${fileId}`).toString('base64');
+          userSearchStates.set(searchStateId, {
+            fileId,
+            userId,
+            type: 'download'
+          });
 
-            await bot.answerCallbackQuery(callbackQuery.id, {
-              text: '✅ File sent in private message!',
-              show_alert: true
-            });
+          await bot.answerCallbackQuery(callbackQuery.id, {
+            text: '🔐 Click the button below to get the file in private chat',
+            show_alert: true
+          });
 
-            // Send instructions if the user hasn't started the bot
-          } catch (error) {
-            if (error.response && error.response.error_code === 403) {
-              const botUsername = (await bot.getMe()).username;
-              await bot.answerCallbackQuery(callbackQuery.id, {
-                text: `🔐 Please start a private chat with me first!\n\n1. Click: @${botUsername}\n2. Press START\n3. Return here and try again`,
-                show_alert: true
-              });
-            } else {
-              throw error;
-            }
-          }
+          // Update message with private chat button
+          const keyboard = {
+            inline_keyboard: [[{
+              text: '🔐 Get file in private chat',
+              url: `https://t.me/${botUsername}?start=search_${searchStateId}`
+            }]]
+          };
+
+          await bot.editMessageReplyMarkup(keyboard, {
+            chat_id: chatId,
+            message_id: messageId
+          });
         } else {
           // For private chats, send directly
           await bot.answerCallbackQuery(callbackQuery.id, {
@@ -417,9 +511,6 @@ async function getFileDetailsFromDatabase(shortId) {
     return null;
   }
 }
-
-
-
 
 
 

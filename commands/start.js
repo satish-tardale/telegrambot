@@ -17,17 +17,17 @@ module.exports = bot => async message => {
 			await user.save();
 		}
 
-		const botName = process.env.BOT_NAME;
-		const botChannel = process.env.BOT_CHANNEL;
-		const username = tgUser.first_name
-			? `[${tgUser.first_name}](tg://user?id=${tgUser.id})`
-			: `@${tgUser.username}`;
+		// const botName = process.env.BOT_NAME;
+		// const botChannel = process.env.BOT_CHANNEL;
+		// const username = tgUser.first_name
+		// 	? `[${tgUser.first_name}](tg://user?id=${tgUser.id})`
+		// 	: `@${tgUser.username}`;
 
-		const text = `Hi ${username} \u{1F680}
-		\n\u{1F41D} ${botName} offers free music, movies, anime, torrent, EDM tracks, series downloads, files, and more.
-		\nTo stay up to date on new *features*, *bug fixes*, and *enhancements* happening here, join our official channel [@${botChannel}](https://t.me/${botChannel})`;
+		// const text = `Hi ${username} \u{1F680}
+		// \n\u{1F41D} ${botName} offers free music, movies, anime, torrent, EDM tracks, series downloads, files, and more.
+		// \nTo stay up to date on new *features*, *bug fixes*, and *enhancements* happening here, join our official channel [@${botChannel}](https://t.me/${botChannel})`;
 
-		await bot.sendMessage(chatId, text, keyboard);
+		// await bot.sendMessage(chatId, text, keyboard);
 	} catch (error) {
 		errorHandler(bot, chatId, error);
 	}
