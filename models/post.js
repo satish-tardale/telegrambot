@@ -9,6 +9,7 @@ const PostSchema = new mongoose.Schema({
   file_name: { type: String },
   file_type: { type: String },
   mime_type: { type: String },
+  file_size:{type:Number},
   channel_id: { type: String, required: true },
   date: { type: Date, required: true },
 }, { collection: 'posts' }); // Explicitly specify the collection name
